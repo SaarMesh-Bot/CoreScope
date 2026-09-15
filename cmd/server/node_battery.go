@@ -51,17 +51,58 @@ const nodeBatteryHistorySQL = `
 		  AND timestamp >= ?
 		ORDER BY timestamp ASC`
 
-// GetNodeBatteryHistory returns time-ordered battery_mv samples for a node,
-// pulled from observer_metrics by joining observers.id (uppercase pubkey)
-// against the node's public_key (lowercase). Rows with NULL battery are skipped.
+// nodeBatteryHistoryWithNodeMetricsSQL additionally UNIONs node_metrics
+// (out-of-band node telemetry, e.g. polled repeater voltage). Both halves
+// match the key in lowercase and uppercase so each can use its
+// (key, timestamp) index. Arguments: lower, upper, since, lower, upper, since.
+const nodeBatteryHistoryWithNodeMetricsSQL = `
+		SELECT timestamp, battery_mv FROM (
+			SELECT timestamp, battery_mv
+			FROM observer_metrics
+			WHERE observer_id IN (?, ?)
+			  AND battery_mv IS NOT NULL
+			  AND timestamp >= ?
+			UNION ALL
+			SELECT timestamp, battery_mv
+			FROM node_metrics
+			WHERE pubkey IN (?, ?)
+			  AND battery_mv IS NOT NULL
+			  AND timestamp >= ?
+		)
+		ORDER BY timestamp ASC`
+
+// GetNodeBatteryHistory returns time-ordered battery_mv samples for a node.
+// Two sources are merged: observer_metrics (nodes that are also observers,
+// joined on observer_id == pubkey) and node_metrics (out-of-band node telemetry
+// such as polled repeater voltage). Rows with NULL battery are skipped.
 //
-// observer_id is matched in lowercase and in uppercase to tolerate historical
-// variation in pubkey casing.
+// The key is matched in lowercase and in uppercase to tolerate historical
+// casing variation. node_metrics may be absent (fresh DB / pre-migration); it
+// is probed and UNIONed in only when present so the endpoint never 500s.
 func (db *DB) GetNodeBatteryHistory(pubkey, since string) ([]NodeBatterySample, error) {
 	if pubkey == "" {
 		return nil, nil
 	}
-	rows, err := db.conn.Query(nodeBatteryHistorySQL, strings.ToLower(pubkey), strings.ToUpper(pubkey), since)
+	lo, up := strings.ToLower(pubkey), strings.ToUpper(pubkey)
+
+	// node_metrics is created by the ingestor migration and may be absent on a
+	// fresh DB or mid-rollout (server updated before ingestor migrates). Probe
+	// and UNION it in only when present, so the endpoint never 500s.
+	hasNodeMetrics := false
+	{
+		var one int
+		if err := db.conn.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_metrics'`).Scan(&one); err == nil {
+			hasNodeMetrics = true
+		}
+	}
+
+	query := nodeBatteryHistorySQL
+	args := []interface{}{lo, up, since}
+	if hasNodeMetrics {
+		query = nodeBatteryHistoryWithNodeMetricsSQL
+		args = []interface{}{lo, up, since, lo, up, since}
+	}
+	rows, err := db.conn.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
