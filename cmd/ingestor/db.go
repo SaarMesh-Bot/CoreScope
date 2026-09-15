@@ -82,6 +82,8 @@ type Store struct {
 	stmtGetObserverRowid       *sql.Stmt
 	stmtUpdateObserverLastSeen *sql.Stmt
 	stmtUpdateNodeTelemetry    *sql.Stmt
+	stmtUpdateNodeTelemetryAt  *sql.Stmt
+	stmtInsertNodeMetrics      *sql.Stmt
 	stmtTouchNodeLastSeen      *sql.Stmt
 	stmtUpsertMetrics          *sql.Stmt
 
@@ -575,6 +577,40 @@ func applySchema(db *sql.DB) error {
 		log.Println("[migration] node telemetry columns added")
 	}
 
+	// Migration: nodes.telemetry_updated_at — freshness stamp for out-of-band node
+	// telemetry (poller-fed battery/voltage). Lets the UI grey out stale values.
+	row = db.QueryRow("SELECT 1 FROM _migrations WHERE name = 'node_telemetry_freshness_v1'")
+	if row.Scan(&migDone) != nil {
+		log.Println("[migration] Adding nodes.telemetry_updated_at...")
+		if _, err := db.Exec(`ALTER TABLE nodes ADD COLUMN telemetry_updated_at TEXT`); err != nil {
+			log.Printf("[migration] nodes.telemetry_updated_at: %v (may already exist)", err)
+		}
+		db.Exec(`INSERT INTO _migrations (name) VALUES ('node_telemetry_freshness_v1')`)
+		log.Println("[migration] nodes.telemetry_updated_at added")
+	}
+
+	// Migration: node_metrics — battery/temperature time-series for nodes that are
+	// NOT observers (e.g. repeaters polled out-of-band). GetNodeBatteryHistory
+	// UNIONs this with observer_metrics so the per-node battery chart works for them.
+	row = db.QueryRow("SELECT 1 FROM _migrations WHERE name = 'node_metrics_v1'")
+	if row.Scan(&migDone) != nil {
+		log.Println("[migration] Creating node_metrics table...")
+		if _, err := db.Exec(`
+			CREATE TABLE IF NOT EXISTS node_metrics (
+				pubkey        TEXT NOT NULL,
+				timestamp     TEXT NOT NULL,
+				battery_mv    INTEGER,
+				temperature_c REAL,
+				PRIMARY KEY (pubkey, timestamp)
+			)
+		`); err != nil {
+			return fmt.Errorf("node_metrics schema: %w", err)
+		}
+		db.Exec(`CREATE INDEX IF NOT EXISTS idx_node_metrics_pubkey_ts ON node_metrics(pubkey, timestamp)`)
+		db.Exec(`INSERT INTO _migrations (name) VALUES ('node_metrics_v1')`)
+		log.Println("[migration] node_metrics table created")
+	}
+
 	// One-time migration: add timestamp index on observations for fast stats queries.
 	// Older databases created before this index was added suffer from full table scans
 	// on COUNT(*) WHERE timestamp > ?, causing /api/stats to take 30s+.
@@ -1008,6 +1044,25 @@ func (s *Store) prepareStatements() error {
 		return err
 	}
 
+	s.stmtUpdateNodeTelemetryAt, err = s.db.Prepare(`
+		UPDATE nodes SET
+			battery_mv = COALESCE(?, battery_mv),
+			temperature_c = COALESCE(?, temperature_c),
+			telemetry_updated_at = ?
+		WHERE public_key = ?
+	`)
+	if err != nil {
+		return err
+	}
+
+	s.stmtInsertNodeMetrics, err = s.db.Prepare(`
+		INSERT OR REPLACE INTO node_metrics (pubkey, timestamp, battery_mv, temperature_c)
+		VALUES (?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+
 	s.stmtUpsertMetrics, err = s.db.Prepare(`
 		INSERT OR REPLACE INTO observer_metrics (observer_id, timestamp, noise_floor, tx_air_secs, rx_air_secs, recv_errors, battery_mv, packets_sent, packets_recv)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1201,6 +1256,42 @@ func (s *Store) UpdateNodeTelemetry(pubKey string, batteryMv *int, temperatureC 
 		tc = *temperatureC
 	}
 	_, err := s.stmtUpdateNodeTelemetry.Exec(bv, tc, pubKey)
+	if err != nil {
+		s.Stats.WriteErrors.Add(1)
+	}
+	return err
+}
+
+// UpdateNodeTelemetryAt updates battery/temperature for a node and records when
+// the telemetry was observed (telemetry_updated_at). Used by the out-of-band
+// node-telemetry ingest path (poller-fed). battery_mv/temperature_c may each be nil.
+func (s *Store) UpdateNodeTelemetryAt(pubKey string, batteryMv *int, temperatureC *float64, ts string) error {
+	var bv, tc interface{}
+	if batteryMv != nil {
+		bv = *batteryMv
+	}
+	if temperatureC != nil {
+		tc = *temperatureC
+	}
+	_, err := s.stmtUpdateNodeTelemetryAt.Exec(bv, tc, ts, pubKey)
+	if err != nil {
+		s.Stats.WriteErrors.Add(1)
+	}
+	return err
+}
+
+// InsertNodeMetrics appends a node telemetry history sample keyed by
+// (pubkey, timestamp). Feeds the per-node battery/voltage time-series that
+// GetNodeBatteryHistory UNIONs in for non-observer nodes (e.g. repeaters).
+func (s *Store) InsertNodeMetrics(pubKey, ts string, batteryMv *int, temperatureC *float64) error {
+	var bv, tc interface{}
+	if batteryMv != nil {
+		bv = *batteryMv
+	}
+	if temperatureC != nil {
+		tc = *temperatureC
+	}
+	_, err := s.stmtInsertNodeMetrics.Exec(pubKey, ts, bv, tc)
 	if err != nil {
 		s.Stats.WriteErrors.Add(1)
 	}

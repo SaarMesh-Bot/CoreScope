@@ -809,6 +809,33 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		return
 	}
 
+	// Telemetry topic: meshcore/<region>/<pubkey>/telemetry
+	// Out-of-band node telemetry (e.g. battery voltage polled from a repeater via a
+	// companion login/telemetry request and republished here). This does NOT originate
+	// from an observed RF packet, so — like the status topic below — it is not subject
+	// to the per-source IATA filter. Fields: battery_mv (int), temperature_c (float);
+	// either may be absent. Updates the node's current value + freshness stamp and
+	// appends a node_metrics history sample.
+	if len(parts) >= 4 && parts[3] == "telemetry" {
+		pubkey := strings.ToLower(parts[2])
+		bv := optInt(msg, "battery_mv")
+		tc := optFloat(msg, "temperature_c")
+		if bv == nil && tc == nil {
+			return
+		}
+		ts, _ := msg["ts"].(string)
+		if ts == "" {
+			ts = time.Now().UTC().Format(time.RFC3339)
+		}
+		if err := store.UpdateNodeTelemetryAt(pubkey, bv, tc, ts); err != nil {
+			log.Printf("MQTT [%s] node telemetry update error: %v", tag, err)
+		}
+		if err := store.InsertNodeMetrics(pubkey, ts, bv, tc); err != nil {
+			log.Printf("MQTT [%s] node metrics insert error: %v", tag, err)
+		}
+		return
+	}
+
 	// Status topic: meshcore/<region>/<observer_id>/status
 	// Per-source IATA filter does NOT apply here — observer metadata (noise_floor, battery, etc.)
 	// is region-independent and should be accepted from all observers regardless of
