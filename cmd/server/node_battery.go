@@ -39,24 +39,58 @@ type NodeBatterySample struct {
 	BatteryMv int    `json:"battery_mv"`
 }
 
-// GetNodeBatteryHistory returns time-ordered battery_mv samples for a node,
-// pulled from observer_metrics by joining observers.id (uppercase pubkey)
-// against the node's public_key (lowercase). Rows with NULL battery are skipped.
+// GetNodeBatteryHistory returns time-ordered battery_mv samples for a node.
+// Two sources are merged: observer_metrics (nodes that are also observers,
+// joined on observer_id == pubkey) and node_metrics (out-of-band node telemetry
+// such as polled repeater voltage). Rows with NULL battery are skipped.
 //
-// The match is case-insensitive on observer_id to tolerate historical
-// variation in pubkey casing.
+// The match is case-insensitive on the key to tolerate historical casing
+// variation. node_metrics may be absent (fresh DB / pre-migration); it is
+// probed and UNIONed in only when present so the endpoint never 500s.
 func (db *DB) GetNodeBatteryHistory(pubkey, since string) ([]NodeBatterySample, error) {
 	if pubkey == "" {
 		return nil, nil
 	}
 	pk := strings.ToLower(pubkey)
-	rows, err := db.conn.Query(`
+
+	// node_metrics is created by the ingestor migration and may be absent on a
+	// fresh DB or mid-rollout (server updated before ingestor migrates). Probe
+	// once and UNION it in only when present, so the endpoint never 500s.
+	hasNodeMetrics := false
+	{
+		var one int
+		if err := db.conn.QueryRow(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='node_metrics'`).Scan(&one); err == nil {
+			hasNodeMetrics = true
+		}
+	}
+
+	query := `
 		SELECT timestamp, battery_mv
 		FROM observer_metrics
 		WHERE LOWER(observer_id) = ?
 		  AND battery_mv IS NOT NULL
 		  AND timestamp >= ?
-		ORDER BY timestamp ASC`, pk, since)
+		ORDER BY timestamp ASC`
+	args := []interface{}{pk, since}
+	if hasNodeMetrics {
+		query = `
+			SELECT timestamp, battery_mv FROM (
+				SELECT timestamp, battery_mv
+				FROM observer_metrics
+				WHERE LOWER(observer_id) = ?
+				  AND battery_mv IS NOT NULL
+				  AND timestamp >= ?
+				UNION ALL
+				SELECT timestamp, battery_mv
+				FROM node_metrics
+				WHERE LOWER(pubkey) = ?
+				  AND battery_mv IS NOT NULL
+				  AND timestamp >= ?
+			)
+			ORDER BY timestamp ASC`
+		args = []interface{}{pk, since, pk, since}
+	}
+	rows, err := db.conn.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
