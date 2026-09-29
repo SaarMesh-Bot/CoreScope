@@ -335,6 +335,10 @@
               <div class="mnc-val">${stats.avgHops != null ? stats.avgHops.toFixed(1) : '—'}</div>
               <div class="mnc-lbl">Avg hops</div>
             </div>
+            ${node.battery_mv != null ? `<div class="mnc-metric">
+              <div class="mnc-val">${(node.battery_mv / 1000).toFixed(2)} V</div>
+              <div class="mnc-lbl">Battery${node.temperature_c != null ? ' \u00b7 ' + Math.round(node.temperature_c) + '\u00b0C' : ''}</div>
+            </div>` : ''}
           </div>
           ${obs.length ? `<div class="mnc-observers"><strong>Heard by:</strong> ${obs.map(o => escapeHtml(o.observer_name || o.observer_id)).join(', ')}</div>` : ''}
           ${sparkHtml ? `<div class="mnc-spark">${sparkHtml}</div>` : ''}
