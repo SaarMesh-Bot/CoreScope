@@ -608,16 +608,26 @@ func applySchema(db *sql.DB) error {
 		log.Println("[migration] node telemetry columns added")
 	}
 
-	// Migration: nodes.telemetry_updated_at — freshness stamp for out-of-band node
-	// telemetry (poller-fed battery/voltage). Lets the UI grey out stale values.
-	row = db.QueryRow("SELECT 1 FROM _migrations WHERE name = 'node_telemetry_freshness_v1'")
+	// Migration: drop nodes.telemetry_updated_at where an earlier build of the
+	// node-telemetry branch added it. MoveStaleNodes copies rows with
+	// `INSERT OR REPLACE INTO inactive_nodes SELECT * FROM nodes`, which requires
+	// both tables to have the same columns in the same order. The extra column on
+	// nodes alone made every stale-node move fail ("table inactive_nodes has N
+	// columns but N+1 values were supplied"), and the caller ignores that error.
+	// The freshness stamp is redundant anyway: node_metrics keeps the timestamp
+	// of every sample.
+	row = db.QueryRow("SELECT 1 FROM _migrations WHERE name = 'node_telemetry_freshness_drop_v1'")
 	if row.Scan(&migDone) != nil {
-		log.Println("[migration] Adding nodes.telemetry_updated_at...")
-		if _, err := db.Exec(`ALTER TABLE nodes ADD COLUMN telemetry_updated_at TEXT`); err != nil {
-			log.Printf("[migration] nodes.telemetry_updated_at: %v (may already exist)", err)
+		var has int
+		db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name = 'telemetry_updated_at'`).Scan(&has)
+		if has > 0 {
+			log.Println("[migration] Dropping nodes.telemetry_updated_at (keeps nodes/inactive_nodes aligned)...")
+			if _, err := db.Exec(`ALTER TABLE nodes DROP COLUMN telemetry_updated_at`); err != nil {
+				return fmt.Errorf("drop nodes.telemetry_updated_at: %w", err)
+			}
+			log.Println("[migration] nodes.telemetry_updated_at dropped")
 		}
-		db.Exec(`INSERT INTO _migrations (name) VALUES ('node_telemetry_freshness_v1')`)
-		log.Println("[migration] nodes.telemetry_updated_at added")
+		db.Exec(`INSERT INTO _migrations (name) VALUES ('node_telemetry_freshness_drop_v1')`)
 	}
 
 	// Migration: node_metrics — battery/temperature time-series for nodes that are
@@ -1086,8 +1096,7 @@ func (s *Store) prepareStatements() error {
 	s.stmtUpdateNodeTelemetryAt, err = s.db.Prepare(`
 		UPDATE nodes SET
 			battery_mv = COALESCE(?, battery_mv),
-			temperature_c = COALESCE(?, temperature_c),
-			telemetry_updated_at = ?
+			temperature_c = COALESCE(?, temperature_c)
 		WHERE public_key = ?
 	`)
 	if err != nil {
@@ -1324,10 +1333,12 @@ func (s *Store) UpdateNodeTelemetry(pubKey string, batteryMv *int, temperatureC 
 	return err
 }
 
-// UpdateNodeTelemetryAt updates battery/temperature for a node and records when
-// the telemetry was observed (telemetry_updated_at). Used by the out-of-band
-// node-telemetry ingest path (poller-fed). battery_mv/temperature_c may each be nil.
-func (s *Store) UpdateNodeTelemetryAt(pubKey string, batteryMv *int, temperatureC *float64, ts string) error {
+// UpdateNodeTelemetryAt updates battery/temperature for a node from the
+// out-of-band node-telemetry ingest path (poller-fed). battery_mv/temperature_c
+// may each be nil, and a nil value keeps the stored one. When the sample was
+// taken is recorded by InsertNodeMetrics, not on the nodes row: nodes must keep
+// exactly the columns of inactive_nodes (see MoveStaleNodes).
+func (s *Store) UpdateNodeTelemetryAt(pubKey string, batteryMv *int, temperatureC *float64) error {
 	var bv, tc interface{}
 	if batteryMv != nil {
 		bv = *batteryMv
@@ -1335,7 +1346,7 @@ func (s *Store) UpdateNodeTelemetryAt(pubKey string, batteryMv *int, temperature
 	if temperatureC != nil {
 		tc = *temperatureC
 	}
-	_, err := s.stmtUpdateNodeTelemetryAt.Exec(bv, tc, ts, pubKey)
+	_, err := s.stmtUpdateNodeTelemetryAt.Exec(bv, tc, pubKey)
 	if err != nil {
 		s.Stats.WriteErrors.Add(1)
 	}

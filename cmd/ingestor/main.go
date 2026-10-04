@@ -895,8 +895,8 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 	// companion login/telemetry request and republished here). This does NOT originate
 	// from an observed RF packet, so — like the status topic below — it is not subject
 	// to the per-source IATA filter. Fields: battery_mv (int), temperature_c (float);
-	// either may be absent. Updates the node's current value + freshness stamp and
-	// appends a node_metrics history sample.
+	// either may be absent. Updates the node's current value and appends a
+	// node_metrics history sample (which carries the sample time).
 	if len(parts) >= 4 && parts[3] == "telemetry" {
 		pubkey := strings.ToLower(parts[2])
 		bv := optInt(msg, "battery_mv")
@@ -908,7 +908,7 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 		if ts == "" {
 			ts = time.Now().UTC().Format(time.RFC3339)
 		}
-		if err := store.UpdateNodeTelemetryAt(pubkey, bv, tc, ts); err != nil {
+		if err := store.UpdateNodeTelemetryAt(pubkey, bv, tc); err != nil {
 			log.Printf("MQTT [%s] node telemetry update error: %v", tag, err)
 		}
 		if err := store.InsertNodeMetrics(pubkey, ts, bv, tc); err != nil {
