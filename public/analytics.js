@@ -3158,7 +3158,7 @@
       }
 
       // Top hops leaderboard
-      html += `<div class="analytics-section"><h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-trophy"/></svg> Top 20 Longest Hops</h3><table class="data-table"><thead><tr><th scope="col">#</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Distance (${distUnitLabel})</th><th scope="col">Type</th><th scope="col">Obs</th><th scope="col">Best SNR</th><th scope="col">Median SNR</th><th scope="col">Packet</th><th scope="col" class="col-action"></th></tr></thead><tbody>`;
+      html += `<div class="analytics-section"><h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-trophy"/></svg> Top 20 Longest Hops</h3><table class="data-table dist-table" id="distTopHopsTable"><thead><tr><th scope="col">#</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Distance (${distUnitLabel})</th><th scope="col">Type</th><th scope="col">Obs</th><th scope="col">Best SNR</th><th scope="col">Median SNR</th><th scope="col">Packet</th><th scope="col" class="col-action"></th></tr></thead><tbody>`;
       const top20 = data.topHops.slice(0, 20);
       top20.forEach((h, i) => {
         const fromLink = h.fromPk ? `<a href="#/nodes/${encodeURIComponent(h.fromPk)}" class="analytics-link">${esc(h.fromName)}</a>` : esc(h.fromName || '?');
@@ -3175,7 +3175,7 @@
 
       // Top paths
       if (data.topPaths.length) {
-        html += `<div class="analytics-section"><h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-path"/></svg> Top 10 Longest Multi-Hop Paths</h3><table class="data-table"><thead><tr><th scope="col">#</th><th scope="col">Total Distance (${distUnitLabel})</th><th scope="col">Hops</th><th scope="col">Route</th><th scope="col">Packet</th><th scope="col" class="col-action"></th></tr></thead><tbody>`;
+        html += `<div class="analytics-section"><h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-path"/></svg> Top 10 Longest Multi-Hop Paths</h3><table class="data-table dist-table" id="distTopPathsTable"><thead><tr><th scope="col">#</th><th scope="col">Total Distance (${distUnitLabel})</th><th scope="col">Hops</th><th scope="col">Route</th><th scope="col">Packet</th><th scope="col" class="col-action"></th></tr></thead><tbody>`;
         data.topPaths.slice(0, 10).forEach((p, i) => {
           const route = p.hops.map(h => esc(h.fromName)).concat(esc(p.hops[p.hops.length-1].toName)).join(' → ');
           const pktLink = p.hash ? `<a href="#/packet/${encodeURIComponent(p.hash)}" class="analytics-link mono" style="font-size:0.85em">${esc(p.hash.slice(0, 12))}…</a>` : '—';
@@ -3190,6 +3190,18 @@
       }
 
       el.innerHTML = html;
+
+      // Size distance-table columns to their content (full node names in
+      // From/To instead of equal-width ellipsised columns) and make them
+      // user-resizable; widths persist per table via localStorage.
+      // The global `.data-table td { max-width: 0 }` hides each cell's
+      // content width from the measurement, so lift it on these tables first.
+      if (typeof makeColumnsResizable === 'function') {
+        el.querySelectorAll('table.dist-table[id]').forEach(tbl => {
+          tbl.querySelectorAll('td').forEach(td => { td.style.maxWidth = 'none'; });
+          makeColumnsResizable('#' + tbl.id, `meshcore-analytics-${tbl.id}-col-widths`);
+        });
+      }
 
       // Wire up map buttons
       el.querySelectorAll('.dist-map-hop').forEach(btn => {
