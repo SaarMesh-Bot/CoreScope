@@ -233,6 +233,12 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/analytics/subpaths-bulk":   {Summary: "Bulk subpath analysis", Tag: "analytics"},
 		"GET /api/analytics/subpath-detail":  {Summary: "Subpath detail", Tag: "analytics"},
 		"GET /api/analytics/neighbor-graph":  {Summary: "Neighbor graph", Description: "Full neighbor affinity graph for visualization.", Tag: "analytics"},
+		"GET /api/analytics/path-links": {Summary: "Mid-path hop links", Description: "Links between consecutive relays in the middle of packet paths (path[i]↔path[i+1]), which the neighbor graph leaves out. A hop counts only when its prefix maps to exactly one relay, or when exactly one located candidate lies within max_hop_km of its located, resolved neighbours in the path (previous/next hop, originator, observer). A node repeated in one path drops both positions. A transmission counts once per link. Kept apart from the neighbor graph: these links do not feed affinity or hop resolution.", Tag: "analytics",
+			QueryParams: []paramMeta{
+				{Name: "min_count", Description: "Minimum number of transmissions carrying the link (default 2)", Type: "integer"},
+				{Name: "min_hash_bytes", Description: "Count only sightings where both hop prefixes have at least this many bytes, 1-3 (default 1)", Type: "integer"},
+				{Name: "limit", Description: "Maximum links returned, most-seen first (default 2000, max 10000)", Type: "integer"},
+			}},
 		"GET /api/analytics/retransmissions": {Summary: "Retransmission pressure over time", Description: "Collision-pressure proxy (#1699): per time bucket, the average number of distinct repeaters in the union of all observed paths of each flood event (route types 0/1, TRACE excluded). A transmission's observations are split into flood events at gaps of more than 5 minutes; each event is bucketed by its first observation, and events before the store retention floor are left out. Hop prefixes are not resolved: a prefix counts once per event, so colliding 1-byte prefixes make this a lower bound. Only repeaters some observer heard are counted, so the value also follows observer coverage; each bucket carries its observer count.", Tag: "analytics",
 			QueryParams: []paramMeta{
 				{Name: "region", Description: "Comma-separated IATA codes; only observations from observers in the region are counted. A region with no known observers is not filtered", Type: "string"},

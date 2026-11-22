@@ -241,6 +241,7 @@ node tests/unit/test-rx-coverage-app-qr.js
 node tests/unit/test-scope-audit-styles-linked.js
 node tests/unit/test-settings-sync.js
 node tests/unit/test-slideover-1056-rowsel-strict.js
+node tests/unit/test-path-links-overlay.js
 node tests/unit/test-top-routes-overlay.js
 node tests/unit/test-traces.js
 node tests/unit/test-url-state.js

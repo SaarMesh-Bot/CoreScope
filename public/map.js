@@ -25,6 +25,10 @@
   let topRoutesEdges = null; // cached neighbor-graph edges for the Important Links overlay
   let topRoutesRenderTimer = null; // debounce for the Top-N slider
   let topRoutesAccentCache = ''; // cached --accent, invalidated on theme-refresh
+  let pathLinksLayer = null;
+  let pathLinksRenderTimer = null; // debounce for the min-count slider
+  let pathLinksData = null; // cached /analytics/path-links response
+  let pathLinksColorCache = ''; // cached --link-medium, invalidated on theme-refresh
   let userHasMoved = false;
   let controlsCollapsed = false;
 
@@ -605,6 +609,19 @@
               <input type="range" id="mcTopRoutesN" min="10" max="200" step="10" value="50" style="width:100%">
               <div id="mcTopRoutesHint" style="display:none;font-size:11px;color:var(--text-muted);margin-top:4px">No links to show — endpoints may lack GPS, or the chosen axis has no scores yet (the #672 scores need a server that ships them).</div>
             </div>
+            <label for="mcPathLinks" style="margin-top:6px"><input type="checkbox" id="mcPathLinks"> <svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-path"/></svg> Show packet-path links</label>
+            <div id="mcPathLinksOpts" style="display:none;padding-left:20px;margin-top:4px">
+              <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Relay↔relay links from the middle of packet paths (dashed), where both hops resolve without guessing.</div>
+              <label for="mcPathLinksMin" style="font-size:11px;color:var(--text-muted)">Seen in at least <span id="mcPathLinksMinVal">3</span> packets</label>
+              <input type="range" id="mcPathLinksMin" min="1" max="50" step="1" value="3" style="width:100%">
+              <label for="mcPathLinksBytes" style="font-size:11px;color:var(--text-muted)">Hop hash size</label>
+              <select id="mcPathLinksBytes" style="width:100%;margin:2px 0 6px">
+                <option value="1">All (1-byte and up)</option>
+                <option value="2">2-byte and 3-byte only</option>
+                <option value="3">3-byte only</option>
+              </select>
+              <div id="mcPathLinksHint" style="display:none;font-size:11px;color:var(--text-muted);margin-top:4px">No packet-path links to show — the endpoints may lack GPS, or the server does not ship /api/analytics/path-links yet.</div>
+            </div>
           </fieldset>
           <fieldset class="mc-section">
             <legend class="mc-label">Last Heard</legend>
@@ -918,8 +935,39 @@
         // ~every 80ms so a large top-N doesn't lag the map.
         if (cb.checked) {
           clearTimeout(topRoutesRenderTimer);
+    clearTimeout(pathLinksRenderTimer);
           topRoutesRenderTimer = setTimeout(renderTopRoutes, 80);
         }
+      });
+    })();
+
+    // Packet-path links overlay: relay↔relay links from the middle of paths.
+    (function initPathLinks() {
+      const cb = document.getElementById('mcPathLinks');
+      if (!cb) return;
+      const opts = document.getElementById('mcPathLinksOpts');
+      const minSlider = document.getElementById('mcPathLinksMin');
+      const minVal = document.getElementById('mcPathLinksMinVal');
+      const bytesSel = document.getElementById('mcPathLinksBytes');
+      const savedMin = localStorage.getItem('meshcore-path-links-min');
+      if (savedMin && minSlider) { minSlider.value = savedMin; if (minVal) minVal.textContent = savedMin; }
+      const savedBytes = localStorage.getItem('meshcore-path-links-bytes');
+      if (savedBytes && bytesSel) bytesSel.value = savedBytes;
+      cb.addEventListener('change', e => {
+        if (opts) opts.style.display = e.target.checked ? '' : 'none';
+        if (e.target.checked) loadPathLinks(); else clearPathLinks();
+      });
+      if (minSlider) minSlider.addEventListener('input', e => {
+        if (minVal) minVal.textContent = e.target.value;
+        localStorage.setItem('meshcore-path-links-min', e.target.value);
+        if (cb.checked) {
+          clearTimeout(pathLinksRenderTimer);
+          pathLinksRenderTimer = setTimeout(renderPathLinks, 80);
+        }
+      });
+      if (bytesSel) bytesSel.addEventListener('change', e => {
+        localStorage.setItem('meshcore-path-links-bytes', e.target.value);
+        if (cb.checked) loadPathLinks();
       });
     })();
 
@@ -1810,6 +1858,7 @@
       // the neighbor-graph edges (not just re-render the stale cache) so the
       // overlay tracks the current graph + scores.
       if (topRoutesEdges && document.getElementById('mcTopRoutes')?.checked) loadTopRoutes();
+      if (pathLinksData && document.getElementById('mcPathLinks')?.checked) renderPathLinks();
 
       // Restore heatmap if previously enabled
       if (localStorage.getItem('meshcore-map-heatmap') === 'true') {
@@ -2774,6 +2823,97 @@
   }
   // ─── End Important Links ─────────────────────────────────────────────────────
 
+  // ─── Packet-path links ───────────────────────────────────────────────────────
+  // Relay↔relay links from the MIDDLE of packet paths (path[i]↔path[i+1]),
+  // served by /api/analytics/path-links. The neighbor graph only covers the
+  // two ends of a path (originator↔first hop, observer↔last hop); these fill
+  // in the rest. The server keeps only hops it can pin down without guessing.
+
+  // computePathLinkLines is the pure core (no DOM/Leaflet): join links with
+  // node coords, drop links below minCount or with an endpoint off the map,
+  // and return them most-seen first with rel = count / max count.
+  function computePathLinkLines(links, nodeList, minCount) {
+    const pos = {};
+    (nodeList || []).forEach(n => {
+      if (!n || !n.public_key) return;
+      if (n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0)) {
+        pos[n.public_key.toLowerCase()] = [n.lat, n.lon];
+      }
+    });
+    const min = Math.max(1, Math.floor(Number(minCount) || 1));
+    const out = [];
+    (links || []).forEach(l => {
+      const a = (l.source || '').toLowerCase();
+      const b = (l.target || '').toLowerCase();
+      const pa = pos[a], pb = pos[b];
+      if (!pa || !pb || a === b) return;
+      const count = Number(l.count) || 0;
+      if (count < min) return;
+      out.push({ a, b, pa, pb, count, link: l });
+    });
+    out.sort((x, y) => y.count - x.count || (x.a < y.a ? -1 : x.a > y.a ? 1 : (x.b < y.b ? -1 : 1)));
+    const max = out.length ? out[0].count : 1;
+    out.forEach(t => { t.rel = max > 0 ? t.count / max : 0; });
+    return out;
+  }
+
+  function clearPathLinks() {
+    if (pathLinksLayer) { map.removeLayer(pathLinksLayer); pathLinksLayer = null; }
+  }
+
+  async function loadPathLinks() {
+    const bytes = (document.getElementById('mcPathLinksBytes') || {}).value || '1';
+    try {
+      pathLinksData = await api('/analytics/path-links?min_count=1&limit=5000&min_hash_bytes=' + encodeURIComponent(bytes), { ttl: CLIENT_TTL.analyticsRF });
+      renderPathLinks();
+    } catch (err) {
+      console.warn('[path-links] failed to load:', err);
+      pathLinksData = null;
+      clearPathLinks();
+      const hint = document.getElementById('mcPathLinksHint');
+      if (hint) hint.style.display = '';
+    }
+  }
+
+  function pathLinksColor() {
+    if (!pathLinksColorCache) {
+      pathLinksColorCache = getComputedStyle(document.documentElement).getPropertyValue('--link-medium').trim() || '#bf8700';
+    }
+    return pathLinksColorCache;
+  }
+
+  function renderPathLinks() {
+    if (!map || !pathLinksData) return;
+    clearPathLinks();
+    const minCount = parseInt((document.getElementById('mcPathLinksMin') || {}).value, 10) || 1;
+    const lines = computePathLinkLines(pathLinksData.links, nodes, minCount);
+    const hint = document.getElementById('mcPathLinksHint');
+    if (hint) hint.style.display = lines.length ? 'none' : '';
+    pathLinksLayer = L.layerGroup();
+    const nameByPk = {};
+    nodes.forEach(n => { if (n && n.public_key) nameByPk[n.public_key.toLowerCase()] = n.name || n.public_key.slice(0, 8); });
+    const color = pathLinksColor();
+    lines.forEach(t => {
+      const line = L.polyline([t.pa, t.pb], {
+        color: color,
+        weight: 1 + Math.sqrt(t.rel) * 4,   // 1–5px, sqrt so weak links stay visible
+        opacity: 0.35 + t.rel * 0.5,
+        dashArray: '6 6'
+      });
+      const l = t.link;
+      const bytes = l.hash_bytes || {};
+      line.bindPopup('<b>Packet-path link</b><br>' +
+        escapeHtml(nameByPk[t.a] || t.a.slice(0, 8)) + ' ↔ ' + escapeHtml(nameByPk[t.b] || t.b.slice(0, 8)) + '<br>' +
+        'Packets: ' + t.count + ' (observers: ' + (l.observers || 0) + ')<br>' +
+        'Hash size 1/2/3 byte: ' + (bytes['1'] || 0) + ' / ' + (bytes['2'] || 0) + ' / ' + (bytes['3'] || 0) + '<br>' +
+        (l.geo_resolved ? 'Resolved by location: ' + l.geo_resolved + '<br>' : '') +
+        'Last seen: ' + escapeHtml(l.last_seen || '—'));
+      pathLinksLayer.addLayer(line);
+    });
+    pathLinksLayer.addTo(map);
+  }
+  // ─── End Packet-path links ───────────────────────────────────────────────────
+
   registerPage('map', {
     init: function(app, routeParam) {
       _themeRefreshHandler = () => {
@@ -2781,6 +2921,8 @@
         // Re-read --accent on theme change; redraw the overlay if it's on.
         topRoutesAccentCache = '';
         if (topRoutesEdges && document.getElementById('mcTopRoutes')?.checked) renderTopRoutes();
+        pathLinksColorCache = '';
+        if (pathLinksData && document.getElementById('mcPathLinks')?.checked) renderPathLinks();
       };
       window.addEventListener('theme-refresh', _themeRefreshHandler);
       return init(app, routeParam);
