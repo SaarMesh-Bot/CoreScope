@@ -133,6 +133,10 @@ type Server struct {
 	// recomputed every 5 min in a background goroutine. Issue #1481 P0-1.
 	neighborGraphCache neighborGraphCacheField
 
+	// pathLinksCache memoizes /api/analytics/path-links responses per
+	// query shape (path_links.go).
+	pathLinksCache pathLinksCacheField
+
 	// Counter for rebuild-panic events on the neighbor-graph cache
 	// background recomputer. Surfaced via /api/stats. #1483 follow-up.
 	neighborGraphCacheRebuildFailures uint64
@@ -378,6 +382,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/analytics/subpaths-bulk", s.handleAnalyticsSubpathsBulk).Methods("GET")
 	r.HandleFunc("/api/analytics/subpath-detail", s.handleAnalyticsSubpathDetail).Methods("GET")
 	r.HandleFunc("/api/analytics/neighbor-graph", s.handleNeighborGraph).Methods("GET")
+	r.HandleFunc("/api/analytics/path-links", s.handlePathLinks).Methods("GET")
 	r.HandleFunc("/api/analytics/relay-airtime-share", s.handleAnalyticsRelayAirtimeShare).Methods("GET")
 	r.HandleFunc("/api/analytics/retransmissions", s.handleAnalyticsRetransmissions).Methods("GET")
 

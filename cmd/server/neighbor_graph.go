@@ -163,6 +163,11 @@ type NeighborGraph struct {
 	// checks during upsertEdge. Populated by the builder; empty for graphs
 	// constructed via NewNeighborGraph directly (geo filter inert).
 	nodeGeo map[string]nodeGeoInfo
+
+	// pathLinks holds hop↔hop links from the middle of packet paths
+	// (path_links.go). Kept apart from edges so they never feed affinity
+	// scoring or hop resolution.
+	pathLinks map[edgeKey]*PathLink
 }
 
 // nodeGeoInfo is the minimal geo slice cached on the graph for upsertEdge.
@@ -174,8 +179,9 @@ type nodeGeoInfo struct {
 // NewNeighborGraph creates an empty graph.
 func NewNeighborGraph() *NeighborGraph {
 	return &NeighborGraph{
-		edges:  make(map[edgeKey]*NeighborEdge),
-		byNode: make(map[string][]*NeighborEdge),
+		edges:     make(map[edgeKey]*NeighborEdge),
+		byNode:    make(map[string][]*NeighborEdge),
+		pathLinks: make(map[edgeKey]*PathLink),
 	}
 }
 
@@ -328,6 +334,7 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 			fromLower = cachedToLower(lowerCache, fromNode)
 		}
 
+		var linkTx pathLinkTx
 		for _, obs := range p.observations {
 			if obs.isOwnTransmission() {
 				continue
@@ -354,6 +361,16 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 						g.upsertEdgeWithCandidates(fromLower, firstHop, candidates, observerPK, obs.SNR, parseTimestamp(obs.Timestamp), lowerCache)
 					}
 				}
+			}
+
+			// Mid-path hop↔hop links, kept apart from the edges
+			// (path_links.go).
+			if len(path) >= 2 {
+				origin := ""
+				if hasFullOriginator {
+					origin = fromLower
+				}
+				g.recordPathLinks(path, origin, observerPK, parseTimestamp(obs.Timestamp), pm, geo, opts.PathTrust, &linkTx)
 			}
 
 			// Edge 2: observer ↔ path[last] — ALL packet types
